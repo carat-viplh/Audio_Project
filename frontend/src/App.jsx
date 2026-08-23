@@ -60,12 +60,16 @@ function App() {
   const [statusText, setStatusText] = useState("");
   const [audioUrl, setAudioUrl] = useState("");
   const [audioMeta, setAudioMeta] = useState(null);
+  const [speechAudioUrl, setSpeechAudioUrl] = useState("");
 
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
   const chunksRef = useRef([]);
   const startedAtRef = useRef(0);
   const audioUrlRef = useRef("");
+  const speechAudioUrlRef = useRef("");
+  const speechAudioRef = useRef(null);
+  const wantSpeechAutoplayRef = useRef(false);
   const stoppingRef = useRef(false);
   const wantRecordingRef = useRef(false);
   const startingRef = useRef(false);
@@ -80,6 +84,9 @@ function App() {
       if (audioUrlRef.current) {
         URL.revokeObjectURL(audioUrlRef.current);
       }
+      if (speechAudioUrlRef.current) {
+        URL.revokeObjectURL(speechAudioUrlRef.current);
+      }
     };
   }, []);
 
@@ -90,9 +97,38 @@ function App() {
     }
   }
 
+  function revokeSpeechUrl() {
+    if (speechAudioUrlRef.current) {
+      URL.revokeObjectURL(speechAudioUrlRef.current);
+      speechAudioUrlRef.current = "";
+    }
+  }
+
   function stopStream() {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+  }
+
+  function base64ToObjectUrl(base64, mimeType) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: mimeType || "audio/wav" });
+    return URL.createObjectURL(blob);
+  }
+
+  async function playSpeechAudio() {
+    const el = speechAudioRef.current;
+    if (!el) return false;
+    try {
+      el.currentTime = 0;
+      await el.play();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async function uploadAudio(file) {
@@ -175,10 +211,57 @@ function App() {
         })
         .join("\n");
 
-      setResultText(
-        `识别原文：\n${text}\n\n我的地址：${addressA}\n朋友地址：${addressB}\n碰面想做：${category}\n\n推荐碰面地点：\n${placeLines}`
-      );
-      setStatusText("碰面地点查找完成");
+      const baseResult =
+        `识别原文：\n${text}\n\n我的地址：${addressA}\n朋友地址：${addressB}\n碰面想做：${category}\n\n推荐碰面地点：\n${placeLines}`;
+      setResultText(baseResult);
+      setStatusText("正在生成口播语音…");
+
+      const midpoint = searchData?.midpoint;
+      const { data: finalizeData } = await axios.post(`${API_BASE}/finalize`, {
+        midpoint: {
+          lng: Number(midpoint?.lng),
+          lat: Number(midpoint?.lat),
+        },
+        places: places.map((item) => ({
+          name: typeof item?.name === "string" ? item.name : "未知地点",
+          address: typeof item?.address === "string" ? item.address : "地址暂缺",
+        })),
+      });
+
+      const speech =
+        typeof finalizeData?.speech === "string" ? finalizeData.speech.trim() : "";
+      const audioBase64 =
+        typeof finalizeData?.audio_base64 === "string"
+          ? finalizeData.audio_base64.trim()
+          : "";
+      const mimeType =
+        typeof finalizeData?.mime_type === "string" && finalizeData.mime_type
+          ? finalizeData.mime_type
+          : "audio/wav";
+
+      if (!speech || !audioBase64) {
+        setStatusText("口播生成失败：结果不完整");
+        setResultText(`${baseResult}\n\n口播生成失败，请稍后重试。`);
+        return;
+      }
+
+      revokeSpeechUrl();
+      const url = base64ToObjectUrl(audioBase64, mimeType);
+      speechAudioUrlRef.current = url;
+      wantSpeechAutoplayRef.current = true;
+      setSpeechAudioUrl(url);
+
+      setResultText(`${baseResult}\n\n口播：${speech}`);
+      setStatusText("完成，正在播报…");
+
+      // 等 audio 元素挂上 src 后再播；若被浏览器拦截，用户可点「播放口播」
+      requestAnimationFrame(() => {
+        void playSpeechAudio().then((ok) => {
+          if (ok) {
+            wantSpeechAutoplayRef.current = false;
+          }
+        });
+      });
     } catch (err) {
       const detail = err?.response?.data?.detail;
       if (typeof detail === "string" && detail.trim()) {
@@ -188,7 +271,10 @@ function App() {
       }
 
       const url = err?.config?.url || "";
-      if (String(url).includes("/search")) {
+      if (String(url).includes("/finalize")) {
+        setStatusText("口播生成失败，请稍后重试");
+        setResultText("口播生成失败，请稍后重试");
+      } else if (String(url).includes("/search")) {
         setStatusText("查找碰面地点失败，请稍后重试");
         setResultText("查找碰面地点失败，请稍后重试");
       } else if (String(url).includes("/extract")) {
@@ -319,7 +405,17 @@ function App() {
   }
 
   function handlePlayClick() {
-    window.alert("播放功能下一步实现");
+    if (!speechAudioUrlRef.current || !speechAudioRef.current) {
+      setStatusText("还没有可播放的口播，请先完成一次录音查询");
+      return;
+    }
+    void playSpeechAudio().then((ok) => {
+      if (!ok) {
+        setStatusText("播放失败，请再点一次「播放口播」");
+      } else {
+        setStatusText("正在播报…");
+      }
+    });
   }
 
   function handleAudioLoadedMetadata(event) {
@@ -328,6 +424,18 @@ function App() {
     setAudioMeta((prev) =>
       prev ? { ...prev, durationSec: duration } : prev
     );
+  }
+
+  function handleSpeechCanPlay() {
+    if (!wantSpeechAutoplayRef.current) return;
+    void playSpeechAudio().then((ok) => {
+      if (ok) {
+        wantSpeechAutoplayRef.current = false;
+        setStatusText("正在播报…");
+      } else {
+        setStatusText("口播已就绪，请点「播放口播」收听");
+      }
+    });
   }
 
   return (
@@ -376,6 +484,15 @@ function App() {
           <h2 className="result__heading">识别与推荐</h2>
           <pre className="result__body">{resultText}</pre>
         </section>
+
+        {speechAudioUrl ? (
+          <audio
+            ref={speechAudioRef}
+            src={speechAudioUrl}
+            preload="auto"
+            onCanPlay={handleSpeechCanPlay}
+          />
+        ) : null}
 
         <button type="button" className="play-btn" onClick={handlePlayClick}>
           播放口播

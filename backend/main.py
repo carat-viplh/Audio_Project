@@ -24,7 +24,10 @@ _STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 BAILIAN_ASR_URL = (
     "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 )
+BAILIAN_TTS_URL = BAILIAN_ASR_URL
 ASR_MODEL = "qwen3-asr-flash"
+TTS_MODEL = "qwen3-tts-flash"
+TTS_VOICE = "Cherry"
 
 DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
@@ -70,6 +73,17 @@ EXTRACT_SYSTEM_PROMPT = """你是碰面地点助手的信息抽取模块。用�
 禁止输出 JSON 以外的任何字符。"""
 
 
+FINALIZE_SYSTEM_PROMPT = """你是碰面地点助手的口播文案模块。根据中点坐标和推荐地点列表，生成一句自然、口语化的中文播报语，供语音朗读。
+
+要求：
+1. 只输出一句完整播报语，不要标题、列表、引号、Markdown 或解释。
+2. 语气亲切简洁，适合直接朗读，控制在 40～80 字左右。
+3. 内容需包含：两人中间位置的大致方位（可借用推荐地点所在商圈/路名）、首选推荐店名、该店地址。
+4. 优先推荐列表中的第一家；若地址为「地址暂缺」，可只说店名与大致方位。
+5. 不要念经纬度数字，不要说「根据数据」「模型推荐」等技术用语。
+6. 示例风格：你们中间的位置在打铁关附近，推荐星巴克打铁关店，地址在中河中路XX号。"""
+
+
 class ExtractRequest(BaseModel):
     text: str = Field(..., min_length=1)
 
@@ -78,6 +92,21 @@ class SearchRequest(BaseModel):
     address_a: str = Field(..., min_length=1)
     address_b: str = Field(..., min_length=1)
     category: str = Field(..., min_length=1)
+
+
+class MidpointModel(BaseModel):
+    lng: float
+    lat: float
+
+
+class PlaceItem(BaseModel):
+    name: str = Field(..., min_length=1)
+    address: str = ""
+
+
+class FinalizeRequest(BaseModel):
+    midpoint: MidpointModel
+    places: list[PlaceItem] = Field(..., min_length=1)
 
 
 app = FastAPI(title="语音约碰面后端")
@@ -106,28 +135,61 @@ def health() -> dict[str, str]:
 
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)) -> dict[str, object]:
+    print("【上传】开始接收录音文件。")
     original_name = file.filename or "recording.webm"
     suffix = Path(original_name).suffix or ".webm"
     filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{suffix}"
     dest = _STORAGE_DIR / filename
 
+    total_bytes = 0
     async with aiofiles.open(dest, "wb") as out:
         while True:
             chunk = await file.read(1024 * 1024)
             if not chunk:
                 break
+            total_bytes += len(chunk)
             await out.write(chunk)
 
+    if total_bytes == 0:
+        print("【上传】审核失败：文件内容为空。")
+        raise HTTPException(
+            status_code=400,
+            detail="没有听到有效音频，请重新录音后再试。",
+        )
+
+    print(f"【上传】审核通过：已保存 {filename}，大小 {total_bytes} 字节。")
     return {"success": True, "filename": filename}
 
 
 def _get_bailian_api_key() -> str:
     key = (config.get("BAILIAN_API_KEY") or "").strip()
     if not key:
-        print("错误：未配置 BAILIAN_API_KEY，请在 backend/.env 中填写。")
+        print("【配置】错误：未配置 BAILIAN_API_KEY，请在 backend/.env 中填写。")
         raise HTTPException(
             status_code=500,
-            detail="语音识别服务未配置，请先在后端 .env 中填写 BAILIAN_API_KEY。",
+            detail="语音服务未配置，请先在后端 .env 中填写 BAILIAN_API_KEY。",
+        )
+    return key
+
+
+def _get_deepseek_api_key() -> str:
+    key = (config.get("DEEPSEEK_API_KEY") or "").strip()
+    if not key:
+        print("【配置】错误：未配置 DEEPSEEK_API_KEY，请在 backend/.env 中填写。")
+        raise HTTPException(
+            status_code=500,
+            detail="信息提取服务未配置，请先在后端 .env 中填写 DEEPSEEK_API_KEY。",
+        )
+    return key
+
+
+def _get_amap_api_key() -> str:
+    key = (config.get("AMAP_API_KEY") or "").strip()
+    if not key:
+        print("【配置】错误：未配置 AMAP_API_KEY，请在 backend/.env 中填写。")
+        raise HTTPException(
+            status_code=500,
+            detail="地图服务未配置，请先在后端 .env 中填写 AMAP_API_KEY。",
         )
     return key
 
@@ -179,16 +241,21 @@ def _extract_asr_text(payload: dict) -> str:
 
 @app.post("/asr")
 async def asr(file: UploadFile = File(...)) -> dict[str, str]:
+    print("【语音识别】开始处理。")
     api_key = _get_bailian_api_key()
     audio_bytes = await file.read()
     if not audio_bytes:
-        print("错误：语音识别失败，上传的音频内容为空。")
+        print("【语音识别】审核失败：上传的音频内容为空。")
         raise HTTPException(
             status_code=400,
             detail="没有听到有效音频，请重新录音后再试。",
         )
 
     mime = _guess_audio_mime(file.filename)
+    print(
+        f"【语音识别】收到音频 {len(audio_bytes)} 字节，类型 {mime}，"
+        f"文件名 {file.filename or '未知'}。"
+    )
     data_uri = f"data:{mime};base64,{base64.b64encode(audio_bytes).decode('ascii')}"
     body = {
         "model": ASR_MODEL,
@@ -219,10 +286,10 @@ async def asr(file: UploadFile = File(...)) -> dict[str, str]:
                 json=body,
             )
     except httpx.TimeoutException:
-        print("错误：调用百炼语音识别超时。")
+        print("【语音识别】错误：调用百炼超时。")
         raise HTTPException(status_code=504, detail="语音识别超时，请稍后重试。")
     except httpx.HTTPError as exc:
-        print(f"错误：调用百炼语音识别网络失败：{exc}")
+        print(f"【语音识别】错误：调用百炼网络失败：{exc}")
         raise HTTPException(
             status_code=502,
             detail="语音识别服务暂时不可用，请稍后重试。",
@@ -230,7 +297,7 @@ async def asr(file: UploadFile = File(...)) -> dict[str, str]:
 
     if response.status_code != 200:
         print(
-            f"错误：百炼语音识别 HTTP 状态异常：{response.status_code}，"
+            f"【语音识别】错误：百炼 HTTP 状态异常：{response.status_code}，"
             f"响应片段：{response.text[:500]}"
         )
         raise HTTPException(
@@ -241,14 +308,14 @@ async def asr(file: UploadFile = File(...)) -> dict[str, str]:
     try:
         payload = response.json()
     except ValueError:
-        print("错误：百炼语音识别返回了无法解析的内容。")
+        print("【语音识别】错误：百炼返回了无法解析的内容。")
         raise HTTPException(
             status_code=502,
             detail="语音识别结果异常，请稍后重试。",
         )
 
     if payload.get("code") and not payload.get("output"):
-        print(f"错误：百炼语音识别业务失败：{payload}")
+        print(f"【语音识别】错误：百炼业务失败：{payload}")
         raise HTTPException(
             status_code=502,
             detail="语音识别失败，请确认密钥与模型权限后重试。",
@@ -256,24 +323,14 @@ async def asr(file: UploadFile = File(...)) -> dict[str, str]:
 
     text = _extract_asr_text(payload)
     if not text:
-        print(f"错误：百炼语音识别结果为空。原始返回：{payload}")
+        print(f"【语音识别】审核失败：识别结果为空。原始返回：{payload}")
         raise HTTPException(
             status_code=422,
             detail="没有听清你说的话，请靠近麦克风再说一次。",
         )
 
+    print(f"【语音识别】审核通过：识别文字「{text}」。")
     return {"text": text}
-
-
-def _get_deepseek_api_key() -> str:
-    key = (config.get("DEEPSEEK_API_KEY") or "").strip()
-    if not key:
-        print("错误：未配置 DEEPSEEK_API_KEY，请在 backend/.env 中填写。")
-        raise HTTPException(
-            status_code=500,
-            detail="信息提取服务未配置，请先在后端 .env 中填写 DEEPSEEK_API_KEY。",
-        )
-    return key
 
 
 def _strip_json_fence(raw: str) -> str:
@@ -320,11 +377,13 @@ def _parse_extract_payload(raw_content: str) -> dict[str, str]:
 
 @app.post("/extract")
 async def extract(body: ExtractRequest) -> dict[str, str]:
+    print("【信息提取】开始处理。")
     user_text = body.text.strip()
     if not user_text:
-        print("错误：信息提取失败，输入文字为空。")
+        print("【信息提取】审核失败：输入文字为空。")
         raise HTTPException(status_code=400, detail="没有可用的识别文字，请重新录音。")
 
+    print(f"【信息提取】输入原文：「{user_text}」。")
     api_key = _get_deepseek_api_key()
     request_body: dict[str, Any] = {
         "model": DEEPSEEK_MODEL,
@@ -347,10 +406,10 @@ async def extract(body: ExtractRequest) -> dict[str, str]:
                 json=request_body,
             )
     except httpx.TimeoutException:
-        print("错误：调用 DeepSeek 信息提取超时。")
+        print("【信息提取】错误：调用 DeepSeek 超时。")
         raise HTTPException(status_code=504, detail="信息提取超时，请稍后重试。")
     except httpx.HTTPError as exc:
-        print(f"错误：调用 DeepSeek 信息提取网络失败：{exc}")
+        print(f"【信息提取】错误：调用 DeepSeek 网络失败：{exc}")
         raise HTTPException(
             status_code=502,
             detail="信息提取服务暂时不可用，请稍后重试。",
@@ -358,7 +417,7 @@ async def extract(body: ExtractRequest) -> dict[str, str]:
 
     if response.status_code != 200:
         print(
-            f"错误：DeepSeek 信息提取 HTTP 状态异常：{response.status_code}，"
+            f"【信息提取】错误：DeepSeek HTTP 状态异常：{response.status_code}，"
             f"响应片段：{response.text[:500]}"
         )
         raise HTTPException(
@@ -372,7 +431,7 @@ async def extract(body: ExtractRequest) -> dict[str, str]:
         if not isinstance(raw_content, str):
             raise TypeError("content 不是字符串")
     except (ValueError, KeyError, IndexError, TypeError) as exc:
-        print(f"错误：DeepSeek 返回结构异常：{exc}；原始响应：{response.text[:500]}")
+        print(f"【信息提取】错误：DeepSeek 返回结构异常：{exc}；原始响应：{response.text[:500]}")
         raise HTTPException(
             status_code=502,
             detail="信息提取结果异常，请稍后重试。",
@@ -381,7 +440,7 @@ async def extract(body: ExtractRequest) -> dict[str, str]:
     try:
         result = _parse_extract_payload(raw_content)
     except (ValueError, json.JSONDecodeError) as exc:
-        print(f"错误：信息提取审核失败：{exc}；模型原文：{raw_content[:500]}")
+        print(f"【信息提取】审核失败：{exc}；模型原文：{raw_content[:500]}")
         message = str(exc)
         if "只提取到一个地址" in message:
             detail = "只听清了一个地址，请再说一次两个人各自在哪里。"
@@ -391,18 +450,11 @@ async def extract(body: ExtractRequest) -> dict[str, str]:
             detail = "没能理解你的碰面信息，请再说一次两个人的位置和想做什么。"
         raise HTTPException(status_code=422, detail=detail)
 
+    print(
+        f"【信息提取】审核通过：address_a=「{result['address_a']}」，"
+        f"address_b=「{result['address_b']}」，category=「{result['category']}」。"
+    )
     return result
-
-
-def _get_amap_api_key() -> str:
-    key = (config.get("AMAP_API_KEY") or "").strip()
-    if not key:
-        print("错误：未配置 AMAP_API_KEY，请在 backend/.env 中填写。")
-        raise HTTPException(
-            status_code=500,
-            detail="地图服务未配置，请先在后端 .env 中填写 AMAP_API_KEY。",
-        )
-    return key
 
 
 def _amap_count(payload: dict) -> int:
@@ -422,10 +474,10 @@ async def _amap_get(
     try:
         response = await client.get(url, params=params)
     except httpx.TimeoutException:
-        print(f"错误：高德{step_label}网络请求超时。")
+        print(f"【地点搜索】错误：高德{step_label}网络请求超时。")
         raise HTTPException(status_code=504, detail="查找碰面地点超时，请稍后重试。")
     except httpx.HTTPError as exc:
-        print(f"错误：高德{step_label}网络请求失败：{exc}")
+        print(f"【地点搜索】错误：高德{step_label}网络请求失败：{exc}")
         raise HTTPException(
             status_code=502,
             detail="地图服务暂时不可用，请稍后重试。",
@@ -433,7 +485,7 @@ async def _amap_get(
 
     if response.status_code != 200:
         print(
-            f"错误：高德{step_label} HTTP 状态异常：{response.status_code}，"
+            f"【地点搜索】错误：高德{step_label} HTTP 状态异常：{response.status_code}，"
             f"响应片段：{response.text[:300]}"
         )
         raise HTTPException(status_code=502, detail="地图服务调用失败，请稍后重试。")
@@ -441,16 +493,18 @@ async def _amap_get(
     try:
         payload = response.json()
     except ValueError:
-        print(f"错误：高德{step_label}返回了无法解析的内容。")
+        print(f"【地点搜索】错误：高德{step_label}返回了无法解析的内容。")
         raise HTTPException(status_code=502, detail="地图服务返回异常，请稍后重试。")
 
     if str(payload.get("status")) != "1":
         info = payload.get("info") or payload.get("infocode") or "未知原因"
         print(
-            f"错误：高德{step_label}业务调用失败，status={payload.get('status')}，info={info}"
+            f"【地点搜索】错误：高德{step_label}业务调用失败，"
+            f"status={payload.get('status')}，info={info}"
         )
         raise HTTPException(status_code=502, detail="地图服务调用失败，请稍后重试。")
 
+    print(f"【地点搜索】审核通过：高德{step_label}成功。")
     return payload
 
 
@@ -464,7 +518,8 @@ def _parse_geocode_location(
     geocodes = payload.get("geocodes") or []
     if count == 0 or not geocodes:
         print(
-            f"错误：地址「{address_text}」（{role_label}）地理编码 count 为 0，未能识别该地址。"
+            f"【地点搜索】审核失败：地址「{address_text}」（{role_label}）"
+            f"地理编码 count 为 0，未能识别该地址。"
         )
         raise HTTPException(
             status_code=422,
@@ -475,7 +530,8 @@ def _parse_geocode_location(
     parts = location.split(",")
     if len(parts) != 2:
         print(
-            f"错误：地址「{address_text}」（{role_label}）地理编码缺少有效经纬度：{location}"
+            f"【地点搜索】审核失败：地址「{address_text}」（{role_label}）"
+            f"地理编码缺少有效经纬度：{location}"
         )
         raise HTTPException(
             status_code=422,
@@ -487,29 +543,39 @@ def _parse_geocode_location(
         lat = float(parts[1])
     except ValueError:
         print(
-            f"错误：地址「{address_text}」（{role_label}）经纬度无法解析：{location}"
+            f"【地点搜索】审核失败：地址「{address_text}」（{role_label}）"
+            f"经纬度无法解析：{location}"
         )
         raise HTTPException(
             status_code=422,
             detail="有一个地址没识别出来，换个说法再说说。",
         )
 
+    print(
+        f"【地点搜索】审核通过：地址「{address_text}」（{role_label}）"
+        f"解析为 {lng},{lat}。"
+    )
     return lng, lat
 
 
 @app.post("/search")
 async def search(body: SearchRequest) -> dict[str, Any]:
+    print("【地点搜索】开始处理。")
     address_a = body.address_a.strip()
     address_b = body.address_b.strip()
     category = body.category.strip() or DEFAULT_CATEGORY
 
     if not address_a or not address_b:
-        print("错误：碰面搜索失败，address_a 或 address_b 为空。")
+        print("【地点搜索】审核失败：address_a 或 address_b 为空。")
         raise HTTPException(
             status_code=400,
             detail="请说清两人和碰面品类，例如：我在A，朋友在B，找个中间的咖啡店。",
         )
 
+    print(
+        f"【地点搜索】输入：address_a=「{address_a}」，"
+        f"address_b=「{address_b}」，category=「{category}」。"
+    )
     api_key = _get_amap_api_key()
 
     async with httpx.AsyncClient(trust_env=False, timeout=20.0) as client:
@@ -540,6 +606,7 @@ async def search(body: SearchRequest) -> dict[str, Any]:
         mid_lng = (lng_a + lng_b) / 2
         mid_lat = (lat_a + lat_b) / 2
         location = f"{mid_lng:.6f},{mid_lat:.6f}"
+        print(f"【地点搜索】中点坐标：{location}。")
 
         around = await _amap_get(
             client,
@@ -558,7 +625,8 @@ async def search(body: SearchRequest) -> dict[str, Any]:
     pois = around.get("pois") or []
     if not isinstance(pois, list) or len(pois) == 0:
         print(
-            f"错误：中点周边按品类「{category}」搜索 POI 列表为空（中点 {location}）。"
+            f"【地点搜索】审核失败：中点周边按品类「{category}」"
+            f"搜索 POI 列表为空（中点 {location}）。"
         )
         raise HTTPException(
             status_code=422,
@@ -579,7 +647,7 @@ async def search(body: SearchRequest) -> dict[str, Any]:
 
     if not places:
         print(
-            f"错误：中点周边 POI 原始列表非空，但有效地点（含名称）为 0。"
+            f"【地点搜索】审核失败：中点周边 POI 原始列表非空，但有效地点（含名称）为 0。"
             f"品类「{category}」，中点 {location}。"
         )
         raise HTTPException(
@@ -587,7 +655,239 @@ async def search(body: SearchRequest) -> dict[str, Any]:
             detail="中点附近暂时找不到这类地方，换个品类或再说一次地址试试。",
         )
 
+    print(
+        f"【地点搜索】审核通过：返回 {len(places)} 个地点："
+        + "；".join(f"{p['name']}（{p['address']}）" for p in places)
+    )
     return {
         "midpoint": {"lng": mid_lng, "lat": mid_lat},
         "places": places,
+    }
+
+
+def _clean_speech_text(raw: str) -> str:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:\w+)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    text = text.strip().strip("「」\"'")
+    # 只取第一段，避免模型多写几句
+    for sep in ("\n", "。"):
+        if sep in text and sep == "\n":
+            text = text.split("\n", 1)[0].strip()
+            break
+    return text.strip()
+
+
+async def _generate_speech_text(
+    client: httpx.AsyncClient,
+    *,
+    midpoint: MidpointModel,
+    places: list[PlaceItem],
+) -> str:
+    api_key = _get_deepseek_api_key()
+    places_lines = "\n".join(
+        f"{idx}. {item.name} — {item.address or '地址暂缺'}"
+        for idx, item in enumerate(places, start=1)
+    )
+    user_content = (
+        f"中点经度：{midpoint.lng:.6f}\n"
+        f"中点纬度：{midpoint.lat:.6f}\n"
+        f"推荐地点列表：\n{places_lines}\n"
+        "请生成一句口播语。"
+    )
+    request_body: dict[str, Any] = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": FINALIZE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.4,
+        "stream": False,
+    }
+
+    try:
+        response = await client.post(
+            DEEPSEEK_CHAT_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_body,
+        )
+    except httpx.TimeoutException:
+        print("【口播生成】错误：调用 DeepSeek 超时。")
+        raise HTTPException(status_code=504, detail="口播生成超时，请稍后重试。")
+    except httpx.HTTPError as exc:
+        print(f"【口播生成】错误：调用 DeepSeek 网络失败：{exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="口播生成服务暂时不可用，请稍后重试。",
+        )
+
+    if response.status_code != 200:
+        print(
+            f"【口播生成】错误：DeepSeek HTTP 状态异常：{response.status_code}，"
+            f"响应片段：{response.text[:500]}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="口播生成失败，请确认 DeepSeek 密钥有效后重试。",
+        )
+
+    try:
+        payload = response.json()
+        raw_content = payload["choices"][0]["message"]["content"]
+        if not isinstance(raw_content, str):
+            raise TypeError("content 不是字符串")
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        print(f"【口播生成】错误：DeepSeek 返回结构异常：{exc}；原始响应：{response.text[:500]}")
+        raise HTTPException(status_code=502, detail="口播生成结果异常，请稍后重试。")
+
+    speech = _clean_speech_text(raw_content)
+    if not speech:
+        print(f"【口播生成】审核失败：播报语为空。模型原文：{raw_content[:300]}")
+        raise HTTPException(status_code=422, detail="口播文案生成失败，请稍后重试。")
+
+    print(f"【口播生成】审核通过：播报语「{speech}」。")
+    return speech
+
+
+async def _synthesize_speech_audio(
+    client: httpx.AsyncClient,
+    speech: str,
+) -> bytes:
+    api_key = _get_bailian_api_key()
+    body = {
+        "model": TTS_MODEL,
+        "input": {
+            "text": speech,
+            "voice": TTS_VOICE,
+            "language_type": "Chinese",
+        },
+    }
+
+    try:
+        response = await client.post(
+            BAILIAN_TTS_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+    except httpx.TimeoutException:
+        print("【语音合成】错误：调用百炼 TTS 超时。")
+        raise HTTPException(status_code=504, detail="语音合成超时，请稍后重试。")
+    except httpx.HTTPError as exc:
+        print(f"【语音合成】错误：调用百炼 TTS 网络失败：{exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="语音合成服务暂时不可用，请稍后重试。",
+        )
+
+    if response.status_code != 200:
+        print(
+            f"【语音合成】错误：百炼 TTS HTTP 状态异常：{response.status_code}，"
+            f"响应片段：{response.text[:500]}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="语音合成失败，请确认百炼密钥与 TTS 权限后重试。",
+        )
+
+    try:
+        payload = response.json()
+    except ValueError:
+        print("【语音合成】错误：百炼 TTS 返回了无法解析的内容。")
+        raise HTTPException(status_code=502, detail="语音合成结果异常，请稍后重试。")
+
+    if payload.get("code") and not (payload.get("output") or {}).get("audio"):
+        print(f"【语音合成】错误：百炼 TTS 业务失败：{payload}")
+        raise HTTPException(
+            status_code=502,
+            detail="语音合成失败，请确认百炼密钥与 TTS 权限后重试。",
+        )
+
+    audio_obj = (payload.get("output") or {}).get("audio") or {}
+    audio_b64 = str(audio_obj.get("data") or "").strip()
+    audio_url = str(audio_obj.get("url") or "").strip()
+
+    if audio_b64:
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception as exc:
+            print(f"【语音合成】错误：音频 Base64 解码失败：{exc}")
+            raise HTTPException(status_code=502, detail="语音合成结果异常，请稍后重试。")
+        if audio_bytes:
+            print(f"【语音合成】审核通过：已从 Base64 取得音频，{len(audio_bytes)} 字节。")
+            return audio_bytes
+
+    if not audio_url:
+        print(f"【语音合成】审核失败：响应中无音频 URL/数据。原始返回：{payload}")
+        raise HTTPException(status_code=502, detail="语音合成结果异常，请稍后重试。")
+
+    try:
+        audio_resp = await client.get(audio_url)
+    except httpx.TimeoutException:
+        print("【语音合成】错误：下载 TTS 音频超时。")
+        raise HTTPException(status_code=504, detail="语音合成超时，请稍后重试。")
+    except httpx.HTTPError as exc:
+        print(f"【语音合成】错误：下载 TTS 音频失败：{exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="语音合成服务暂时不可用，请稍后重试。",
+        )
+
+    if audio_resp.status_code != 200 or not audio_resp.content:
+        print(
+            f"【语音合成】错误：下载 TTS 音频失败，"
+            f"status={audio_resp.status_code}，大小={len(audio_resp.content)}。"
+        )
+        raise HTTPException(status_code=502, detail="语音合成结果异常，请稍后重试。")
+
+    print(
+        f"【语音合成】审核通过：已下载音频 {len(audio_resp.content)} 字节（来自 URL）。"
+    )
+    return audio_resp.content
+
+
+@app.post("/finalize")
+async def finalize(body: FinalizeRequest) -> dict[str, str]:
+    print("【播报闭环】开始处理。")
+    places = [item for item in body.places if item.name.strip()]
+    if not places:
+        print("【播报闭环】审核失败：地点列表为空。")
+        raise HTTPException(
+            status_code=400,
+            detail="没有可用的推荐地点，请先完成地点搜索。",
+        )
+
+    print(
+        f"【播报闭环】输入中点：{body.midpoint.lng:.6f},{body.midpoint.lat:.6f}；"
+        f"地点数：{len(places)}。"
+    )
+
+    async with httpx.AsyncClient(trust_env=False, timeout=60.0) as client:
+        speech = await _generate_speech_text(
+            client,
+            midpoint=body.midpoint,
+            places=places,
+        )
+        audio_bytes = await _synthesize_speech_audio(client, speech)
+
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_tts.wav"
+    dest = _STORAGE_DIR / filename
+    async with aiofiles.open(dest, "wb") as out:
+        await out.write(audio_bytes)
+
+    print(
+        f"【播报闭环】审核通过：已生成口播并落盘 {filename}，"
+        f"音频 {len(audio_bytes)} 字节。"
+    )
+    return {
+        "speech": speech,
+        "filename": filename,
+        "mime_type": "audio/wav",
+        "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
     }
