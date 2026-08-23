@@ -124,8 +124,32 @@ function App() {
         return;
       }
 
-      setResultText(text);
-      setStatusText("识别完成");
+      setResultText(`识别原文：\n${text}`);
+      setStatusText("正在提取碰面信息…");
+
+      const { data: extractData } = await axios.post(`${API_BASE}/extract`, {
+        text,
+      });
+
+      const addressA =
+        typeof extractData?.address_a === "string" ? extractData.address_a.trim() : "";
+      const addressB =
+        typeof extractData?.address_b === "string" ? extractData.address_b.trim() : "";
+      const category =
+        typeof extractData?.category === "string" ? extractData.category.trim() : "";
+
+      if (!addressA || !addressB || !category) {
+        setStatusText("信息提取失败：字段不完整");
+        setResultText(
+          `识别原文：\n${text}\n\n没能完整提取碰面信息，请再说一次两个人的位置和想做什么。`
+        );
+        return;
+      }
+
+      setResultText(
+        `识别原文：\n${text}\n\n我的地址：${addressA}\n朋友地址：${addressB}\n碰面想做：${category}`
+      );
+      setStatusText("信息提取完成");
     } catch (err) {
       const detail = err?.response?.data?.detail;
       if (typeof detail === "string" && detail.trim()) {
@@ -135,7 +159,10 @@ function App() {
       }
 
       const url = err?.config?.url || "";
-      if (String(url).includes("/asr")) {
+      if (String(url).includes("/extract")) {
+        setStatusText("信息提取失败，请稍后重试");
+        setResultText("信息提取失败，请稍后重试");
+      } else if (String(url).includes("/asr")) {
         setStatusText("语音识别失败，请稍后重试");
         setResultText("语音识别失败，请稍后重试");
       } else {
