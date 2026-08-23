@@ -32,7 +32,6 @@ DEFAULT_CATEGORY = "咖啡店"
 
 AMAP_GEOCODE_URL = "https://restapi.amap.com/v3/geocode/geo"
 AMAP_AROUND_URL = "https://restapi.amap.com/v3/place/around"
-SEARCH_RADIUS_METERS = 1000
 SEARCH_POI_LIMIT = 3
 
 EXTRACT_SYSTEM_PROMPT = """你是碰面地点助手的信息抽取模块。用户会用一句话描述两个人的位置，以及想在中间碰面做什么。
@@ -529,7 +528,6 @@ async def search(body: SearchRequest) -> dict[str, Any]:
                 "key": api_key,
                 "location": location,
                 "keywords": category,
-                "radius": SEARCH_RADIUS_METERS,
                 "offset": SEARCH_POI_LIMIT,
                 "page": 1,
                 "extensions": "base",
@@ -540,8 +538,7 @@ async def search(body: SearchRequest) -> dict[str, Any]:
     pois = around.get("pois") or []
     if not isinstance(pois, list) or len(pois) == 0:
         print(
-            f"错误：中点周边按品类「{category}」搜索 POI 列表为空"
-            f"（中点 {location}，半径 {SEARCH_RADIUS_METERS} 米）。"
+            f"错误：中点周边按品类「{category}」搜索 POI 列表为空（中点 {location}）。"
         )
         raise HTTPException(
             status_code=422,
