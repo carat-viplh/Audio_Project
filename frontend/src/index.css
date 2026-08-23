@@ -1,0 +1,25 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  color: #1c2a24;
+  background:
+    radial-gradient(ellipse 90% 60% at 50% -10%, #c8e6d9 0%, transparent 55%),
+    radial-gradient(ellipse 70% 50% at 100% 80%, #d4e8f0 0%, transparent 45%),
+    linear-gradient(165deg, #eef5f1 0%, #e4ebe7 45%, #dfe8e4 100%);
+}
+
+button {
+  font-family: inherit;
+}

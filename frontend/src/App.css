@@ -1,0 +1,140 @@
+.page {
+  min-height: 100vh;
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 3rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2rem;
+}
+
+.brand {
+  text-align: center;
+  width: 100%;
+}
+
+.brand-title {
+  margin: 0;
+  font-family: "ZCOOL XiaoWei", "Noto Sans SC", serif;
+  font-size: clamp(2.4rem, 8vw, 3.4rem);
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  color: #14352c;
+  line-height: 1.2;
+}
+
+.brand-sub {
+  margin: 0.75rem 0 0;
+  font-size: 0.95rem;
+  font-weight: 400;
+  color: #4a635a;
+  letter-spacing: 0.02em;
+}
+
+.stage {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.75rem;
+}
+
+.record-btn {
+  position: relative;
+  width: 10.5rem;
+  height: 10.5rem;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  background: linear-gradient(145deg, #2f6f5e 0%, #1f5246 55%, #184339 100%);
+  color: #f3faf7;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  box-shadow: 0 12px 28px rgba(24, 67, 57, 0.28);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.record-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 32px rgba(24, 67, 57, 0.34);
+}
+
+.record-btn:active {
+  transform: translateY(1px) scale(0.98);
+}
+
+.record-btn__core {
+  width: 1.65rem;
+  height: 1.65rem;
+  border-radius: 50%;
+  background: #f4c27a;
+}
+
+.record-btn__label {
+  font-size: 0.95rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.result {
+  width: 100%;
+}
+
+.result__heading {
+  margin: 0 0 0.65rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #5a7369;
+}
+
+.result__body {
+  margin: 0;
+  padding: 1.15rem 1.2rem;
+  min-height: 12rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "Noto Sans SC", "PingFang SC", sans-serif;
+  font-size: 0.95rem;
+  line-height: 1.7;
+  color: #243830;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(36, 86, 72, 0.12);
+  border-radius: 0.35rem;
+}
+
+.play-btn {
+  appearance: none;
+  border: 1px solid #2f6f5e;
+  background: transparent;
+  color: #1f5246;
+  font-size: 1rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  padding: 0.7rem 1.8rem;
+  border-radius: 0.35rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.play-btn:hover {
+  background: #2f6f5e;
+  color: #f3faf7;
+}
+
+@media (max-width: 480px) {
+  .page {
+    padding: 2rem 1.1rem 2.5rem;
+    gap: 1.6rem;
+  }
+
+  .record-btn {
+    width: 9.25rem;
+    height: 9.25rem;
+  }
+}
