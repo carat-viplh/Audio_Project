@@ -30,6 +30,11 @@ DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_CATEGORY = "咖啡店"
 
+AMAP_GEOCODE_URL = "https://restapi.amap.com/v3/geocode/geo"
+AMAP_AROUND_URL = "https://restapi.amap.com/v3/place/around"
+SEARCH_RADIUS_METERS = 1000
+SEARCH_POI_LIMIT = 3
+
 EXTRACT_SYSTEM_PROMPT = """你是碰面地点助手的信息抽取模块。用户会用一句话描述两个人的位置，以及想在中间碰面做什么。
 
 你的任务：只从用户原话中提取三个字段，并严格输出一个 JSON 对象，不要输出任何解释、Markdown、代码块标记或其他文字。
@@ -48,6 +53,12 @@ JSON 固定格式（字段名必须完全一致）：
 
 class ExtractRequest(BaseModel):
     text: str = Field(..., min_length=1)
+
+
+class SearchRequest(BaseModel):
+    address_a: str = Field(..., min_length=1)
+    address_b: str = Field(..., min_length=1)
+    category: str = Field(..., min_length=1)
 
 
 app = FastAPI(title="语音约碰面后端")
@@ -362,3 +373,204 @@ async def extract(body: ExtractRequest) -> dict[str, str]:
         raise HTTPException(status_code=422, detail=detail)
 
     return result
+
+
+def _get_amap_api_key() -> str:
+    key = (config.get("AMAP_API_KEY") or "").strip()
+    if not key:
+        print("错误：未配置 AMAP_API_KEY，请在 backend/.env 中填写。")
+        raise HTTPException(
+            status_code=500,
+            detail="地图服务未配置，请先在后端 .env 中填写 AMAP_API_KEY。",
+        )
+    return key
+
+
+def _amap_count(payload: dict) -> int:
+    raw = payload.get("count", 0)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _amap_get(
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    step_label: str,
+) -> dict[str, Any]:
+    try:
+        response = await client.get(url, params=params)
+    except httpx.TimeoutException:
+        print(f"错误：高德{step_label}网络请求超时。")
+        raise HTTPException(status_code=504, detail="查找碰面地点超时，请稍后重试。")
+    except httpx.HTTPError as exc:
+        print(f"错误：高德{step_label}网络请求失败：{exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="地图服务暂时不可用，请稍后重试。",
+        )
+
+    if response.status_code != 200:
+        print(
+            f"错误：高德{step_label} HTTP 状态异常：{response.status_code}，"
+            f"响应片段：{response.text[:300]}"
+        )
+        raise HTTPException(status_code=502, detail="地图服务调用失败，请稍后重试。")
+
+    try:
+        payload = response.json()
+    except ValueError:
+        print(f"错误：高德{step_label}返回了无法解析的内容。")
+        raise HTTPException(status_code=502, detail="地图服务返回异常，请稍后重试。")
+
+    if str(payload.get("status")) != "1":
+        info = payload.get("info") or payload.get("infocode") or "未知原因"
+        print(
+            f"错误：高德{step_label}业务调用失败，status={payload.get('status')}，info={info}"
+        )
+        raise HTTPException(status_code=502, detail="地图服务调用失败，请稍后重试。")
+
+    return payload
+
+
+def _parse_geocode_location(
+    payload: dict[str, Any],
+    *,
+    role_label: str,
+    address_text: str,
+) -> tuple[float, float]:
+    count = _amap_count(payload)
+    geocodes = payload.get("geocodes") or []
+    if count == 0 or not geocodes:
+        print(
+            f"错误：地址「{address_text}」（{role_label}）地理编码 count 为 0，未能识别该地址。"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="有一个地址没识别出来，换个说法再说说。",
+        )
+
+    location = str(geocodes[0].get("location") or "").strip()
+    parts = location.split(",")
+    if len(parts) != 2:
+        print(
+            f"错误：地址「{address_text}」（{role_label}）地理编码缺少有效经纬度：{location}"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="有一个地址没识别出来，换个说法再说说。",
+        )
+
+    try:
+        lng = float(parts[0])
+        lat = float(parts[1])
+    except ValueError:
+        print(
+            f"错误：地址「{address_text}」（{role_label}）经纬度无法解析：{location}"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="有一个地址没识别出来，换个说法再说说。",
+        )
+
+    return lng, lat
+
+
+@app.post("/search")
+async def search(body: SearchRequest) -> dict[str, Any]:
+    address_a = body.address_a.strip()
+    address_b = body.address_b.strip()
+    category = body.category.strip() or DEFAULT_CATEGORY
+
+    if not address_a or not address_b:
+        print("错误：碰面搜索失败，address_a 或 address_b 为空。")
+        raise HTTPException(
+            status_code=400,
+            detail="请说清两人和碰面品类，例如：我在A，朋友在B，找个中间的咖啡店。",
+        )
+
+    api_key = _get_amap_api_key()
+
+    async with httpx.AsyncClient(trust_env=False, timeout=20.0) as client:
+        geo_a = await _amap_get(
+            client,
+            AMAP_GEOCODE_URL,
+            {"key": api_key, "address": address_a},
+            f"地理编码（我的地址：{address_a}）",
+        )
+        lng_a, lat_a = _parse_geocode_location(
+            geo_a,
+            role_label="我的地址 address_a",
+            address_text=address_a,
+        )
+
+        geo_b = await _amap_get(
+            client,
+            AMAP_GEOCODE_URL,
+            {"key": api_key, "address": address_b},
+            f"地理编码（朋友地址：{address_b}）",
+        )
+        lng_b, lat_b = _parse_geocode_location(
+            geo_b,
+            role_label="朋友地址 address_b",
+            address_text=address_b,
+        )
+
+        mid_lng = (lng_a + lng_b) / 2
+        mid_lat = (lat_a + lat_b) / 2
+        location = f"{mid_lng:.6f},{mid_lat:.6f}"
+
+        around = await _amap_get(
+            client,
+            AMAP_AROUND_URL,
+            {
+                "key": api_key,
+                "location": location,
+                "keywords": category,
+                "radius": SEARCH_RADIUS_METERS,
+                "offset": SEARCH_POI_LIMIT,
+                "page": 1,
+                "extensions": "base",
+            },
+            f"周边搜索（品类：{category}，中点：{location}）",
+        )
+
+    pois = around.get("pois") or []
+    if not isinstance(pois, list) or len(pois) == 0:
+        print(
+            f"错误：中点周边按品类「{category}」搜索 POI 列表为空"
+            f"（中点 {location}，半径 {SEARCH_RADIUS_METERS} 米）。"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="中点附近暂时找不到这类地方，换个品类或再说一次地址试试。",
+        )
+
+    places: list[dict[str, str]] = []
+    for poi in pois[:SEARCH_POI_LIMIT]:
+        if not isinstance(poi, dict):
+            continue
+        name = str(poi.get("name") or "").strip()
+        address = str(poi.get("address") or "").strip()
+        if isinstance(poi.get("address"), list):
+            address = ""
+        if not name:
+            continue
+        places.append({"name": name, "address": address or "地址暂缺"})
+
+    if not places:
+        print(
+            f"错误：中点周边 POI 原始列表非空，但有效地点（含名称）为 0。"
+            f"品类「{category}」，中点 {location}。"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="中点附近暂时找不到这类地方，换个品类或再说一次地址试试。",
+        )
+
+    return {
+        "midpoint": {"lng": mid_lng, "lat": mid_lat},
+        "places": places,
+    }

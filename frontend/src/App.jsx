@@ -149,7 +149,36 @@ function App() {
       setResultText(
         `识别原文：\n${text}\n\n我的地址：${addressA}\n朋友地址：${addressB}\n碰面想做：${category}`
       );
-      setStatusText("信息提取完成");
+      setStatusText("正在查找中点附近地点…");
+
+      const { data: searchData } = await axios.post(`${API_BASE}/search`, {
+        address_a: addressA,
+        address_b: addressB,
+        category,
+      });
+
+      const places = Array.isArray(searchData?.places) ? searchData.places : [];
+      if (places.length === 0) {
+        const msg = "中点附近暂时找不到这类地方，换个品类或再说一次地址试试。";
+        setStatusText(msg);
+        setResultText(
+          `识别原文：\n${text}\n\n我的地址：${addressA}\n朋友地址：${addressB}\n碰面想做：${category}\n\n${msg}`
+        );
+        return;
+      }
+
+      const placeLines = places
+        .map((item, index) => {
+          const name = typeof item?.name === "string" ? item.name : "未知地点";
+          const address = typeof item?.address === "string" ? item.address : "地址暂缺";
+          return `${index + 1}. ${name} — ${address}`;
+        })
+        .join("\n");
+
+      setResultText(
+        `识别原文：\n${text}\n\n我的地址：${addressA}\n朋友地址：${addressB}\n碰面想做：${category}\n\n推荐碰面地点：\n${placeLines}`
+      );
+      setStatusText("碰面地点查找完成");
     } catch (err) {
       const detail = err?.response?.data?.detail;
       if (typeof detail === "string" && detail.trim()) {
@@ -159,7 +188,10 @@ function App() {
       }
 
       const url = err?.config?.url || "";
-      if (String(url).includes("/extract")) {
+      if (String(url).includes("/search")) {
+        setStatusText("查找碰面地点失败，请稍后重试");
+        setResultText("查找碰面地点失败，请稍后重试");
+      } else if (String(url).includes("/extract")) {
         setStatusText("信息提取失败，请稍后重试");
         setResultText("信息提取失败，请稍后重试");
       } else if (String(url).includes("/asr")) {
