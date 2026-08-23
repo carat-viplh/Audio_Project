@@ -98,19 +98,49 @@ function App() {
   async function uploadAudio(file) {
     setStatusText("正在上传到后端…");
     try {
-      const formData = new FormData();
-      formData.append("file", file);
+      const uploadForm = new FormData();
+      uploadForm.append("file", file);
 
-      const { data } = await axios.post(`${API_BASE}/upload`, formData);
+      const { data: uploadData } = await axios.post(
+        `${API_BASE}/upload`,
+        uploadForm
+      );
 
-      if (data?.success && data?.filename) {
-        setResultText(`上传成功\n后端文件名：${data.filename}`);
-        setStatusText("上传完成");
-      } else {
+      if (!(uploadData?.success && uploadData?.filename)) {
         setStatusText("上传失败：后端未返回成功状态");
+        return;
       }
-    } catch {
-      setStatusText("上传失败，请确认后端已在 8003 端口启动");
+
+      setStatusText("正在识别语音…");
+      const asrForm = new FormData();
+      asrForm.append("file", file);
+
+      const { data: asrData } = await axios.post(`${API_BASE}/asr`, asrForm);
+      const text = typeof asrData?.text === "string" ? asrData.text.trim() : "";
+
+      if (!text) {
+        setStatusText("识别失败：未得到文字");
+        setResultText("没有听清你说的话，请靠近麦克风再说一次。");
+        return;
+      }
+
+      setResultText(text);
+      setStatusText("识别完成");
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      if (typeof detail === "string" && detail.trim()) {
+        setStatusText(detail);
+        setResultText(detail);
+        return;
+      }
+
+      const url = err?.config?.url || "";
+      if (String(url).includes("/asr")) {
+        setStatusText("语音识别失败，请稍后重试");
+        setResultText("语音识别失败，请稍后重试");
+      } else {
+        setStatusText("上传失败，请确认后端已在 8003 端口启动");
+      }
     }
   }
 
